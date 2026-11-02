@@ -1,26 +1,27 @@
 import sys
+import os
 from pathlib import Path
 
 import stable_whisper
 
 # --- Paths (all absolute, relative to this file's location) ---
 HERE       = Path(__file__).parent.resolve()
-PUBLIC_DIR = HERE.parent / "public"
-SONG       = HERE / "song.mp3"
-LYRICS     = HERE / "lyrics.txt"
-TIMINGS    = PUBLIC_DIR / "timings.json"
-ASS        = PUBLIC_DIR / "song.ass"
+SESSION_DIR = Path(os.environ.get("LYRICAL_VIDEO_SESSION_DIR", HERE)).resolve()
+SONG       = SESSION_DIR / "song.mp3"
+LYRICS     = SESSION_DIR / "lyrics.txt"
+TIMINGS    = SESSION_DIR / "timings.json"
+ASS        = SESSION_DIR / "song.ass"
 
 LANG  = "hi"
 FONT  = "Nirmala Text Semilight"
-MODEL = "small"
+MODEL = "medium"
 
 # --- Validate inputs exist ---
 for f in [SONG, LYRICS]:
     if not f.exists():
         sys.exit(f"ERROR: Required file not found: {f}")
 
-PUBLIC_DIR.mkdir(parents=True, exist_ok=True)
+SESSION_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- 1. Load model and align lyrics to audio ---
 print("Loading model...")

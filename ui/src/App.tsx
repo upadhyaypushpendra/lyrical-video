@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Timeline, Clip } from "./Timeline";
+import { Timeline, Clip, InstrumentalClip } from "./Timeline";
 import {
   AudioLines,
   Check,
@@ -7,12 +7,22 @@ import {
   Clapperboard,
   Download,
   Music2,
+  Plus,
+  RefreshCw,
   RotateCcw,
   Save,
+  Trash2,
   X,
 } from "lucide-react";
 
-interface Assets { hasSong: boolean; images: string[]; lyrics: string; }
+interface Assets { hasSong: boolean; images: string[]; lyrics: string; coverImage?: string | null; }
+interface SessionSummary {
+  id: string;
+  name: string;
+  hasSong: boolean;
+  imageCount: number;
+  clipsSaved: boolean;
+}
 type PipelineStatus = "idle" | "aligning" | "aligned" | "rendering" | "done" | "error";
 type PipelineStage = "align" | "render";
 type PanelId = "assets" | "align" | "timeline" | "render";
@@ -110,6 +120,10 @@ function getProgressInfo(log: string, stage: PipelineStage, status: PipelineStat
 
 export default function App() {
   const [assets, setAssets] = useState<Assets>({ hasSong: false, images: [], lyrics: "" });
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState("");
+  const [sessionError, setSessionError] = useState("");
+  const [deletingSessionId, setDeletingSessionId] = useState("");
   const [lyrics, setLyrics] = useState("");
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [saveError, setSaveError] = useState("");
@@ -117,26 +131,84 @@ export default function App() {
   const [pipelineLog, setPipelineLog] = useState("");
   const [pipelineStage, setPipelineStage] = useState<PipelineStage | null>(null);
   const [clips, setClips] = useState<Clip[]>([]);
+  const [instrumentalClips, setInstrumentalClips] = useState<InstrumentalClip[]>([]);
   const [clipsSaved, setClipsSaved] = useState(false);
   const [selectedSong, setSelectedSong] = useState<File | null>(null);
   const [selectedImages, setSelectedImages] = useState<File[]>([]);
+  const [selectedCoverImage, setSelectedCoverImage] = useState<File | null>(null);
+  const [selectedCoverPreview, setSelectedCoverPreview] = useState("");
   const songRef = useRef<HTMLInputElement>(null);
   const imagesRef = useRef<HTMLInputElement>(null);
+  const coverImageRef = useRef<HTMLInputElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const fetchAssets = async () => {
-    const data = await fetch("/api/assets").then((r) => r.json());
-    setAssets(data);
-    setLyrics(data.lyrics);
+  useEffect(() => {
+    if (!selectedCoverImage) {
+      setSelectedCoverPreview("");
+      return;
+    }
+    const previewUrl = URL.createObjectURL(selectedCoverImage);
+    setSelectedCoverPreview(previewUrl);
+    return () => URL.revokeObjectURL(previewUrl);
+  }, [selectedCoverImage]);
+
+  const refreshSessions = async () => {
+    const res = await fetch("/api/sessions");
+    if (!res.ok) throw new Error(`Could not load sessions (${res.status}).`);
+    const data = await res.json();
+    setSessions(data.sessions);
+    setActiveSessionId(data.activeSessionId);
   };
 
   const fetchClips = async () => {
-    const data = await fetch("/api/clips").then((r) => r.json());
-    setClips(data);
+    const [clipsRes, instrumentalRes] = await Promise.all([
+      fetch("/api/clips"),
+      fetch("/api/instrumental-clips"),
+    ]);
+    if (!clipsRes.ok || !instrumentalRes.ok) throw new Error("Could not load timeline clips.");
+    const [clipsData, instrumentalData] = await Promise.all([clipsRes.json(), instrumentalRes.json()]);
+    setClips(clipsData);
+    setInstrumentalClips(instrumentalData);
     setClipsSaved(false);
   };
 
-  useEffect(() => { fetchAssets(); }, []);
+  const loadActiveSession = async () => {
+    const [sessionsRes, assetsRes, clipsRes, instrumentalClipsRes, statusRes] = await Promise.all([
+      fetch("/api/sessions"),
+      fetch("/api/assets"),
+      fetch("/api/clips"),
+      fetch("/api/instrumental-clips"),
+      fetch("/api/pipeline/status"),
+    ]);
+    if (!sessionsRes.ok || !assetsRes.ok || !clipsRes.ok || !instrumentalClipsRes.ok || !statusRes.ok) {
+      throw new Error("Could not load the active session.");
+    }
+    const [sessionData, assetsData, clipsData, instrumentalClipsData, statusData] = await Promise.all([
+      sessionsRes.json(),
+      assetsRes.json(),
+      clipsRes.json(),
+      instrumentalClipsRes.json(),
+      statusRes.json(),
+    ]);
+    const activeSession = sessionData.sessions.find((session: SessionSummary) => session.id === sessionData.activeSessionId);
+    setSessions(sessionData.sessions);
+    setActiveSessionId(sessionData.activeSessionId);
+    setAssets(assetsData);
+    setLyrics(assetsData.lyrics);
+    setClips(clipsData);
+    setInstrumentalClips(instrumentalClipsData);
+    setClipsSaved(Boolean(activeSession?.clipsSaved));
+    setPipelineStatus(statusData.status);
+    setPipelineStage(statusData.stage);
+    setPipelineLog(statusData.log);
+    setSessionError("");
+  };
+
+  useEffect(() => {
+    loadActiveSession().catch((error) => {
+      setSessionError(error instanceof Error ? error.message : "Could not load the active session.");
+    });
+  }, []);
   useEffect(() => () => {
     if (pollRef.current) clearInterval(pollRef.current);
   }, []);
@@ -170,17 +242,20 @@ export default function App() {
     form.append("lyrics", lyrics);
     if (selectedSong) form.append("song", selectedSong);
     selectedImages.forEach((file) => form.append("images", file));
+    if (selectedCoverImage) form.append("coverImage", selectedCoverImage);
     try {
       const res = await fetch("/api/upload", { method: "POST", body: form });
       if (!res.ok) {
         const data = await res.json().catch(() => null);
         throw new Error(data?.error ?? `Upload failed (${res.status}).`);
       }
-      await fetchAssets();
+      await loadActiveSession();
       setSelectedSong(null);
       setSelectedImages([]);
+      setSelectedCoverImage(null);
       if (songRef.current) songRef.current.value = "";
       if (imagesRef.current) imagesRef.current.value = "";
+      if (coverImageRef.current) coverImageRef.current.value = "";
       setSaveStatus("saved");
     } catch (error) {
       setSaveStatus("error");
@@ -202,6 +277,14 @@ export default function App() {
     }
   };
 
+  const handleRealign = async () => {
+    const confirmed = window.confirm(
+      "Re-align lyrics using the backend? This will regenerate the timeline and replace your current timeline edits."
+    );
+    if (!confirmed) return;
+    await handleAlign();
+  };
+
   const handleRender = async () => {
     setPipelineStatus("rendering");
     setPipelineLog("");
@@ -217,36 +300,126 @@ export default function App() {
   };
 
   const handleSaveClips = async () => {
-    await fetch("/api/clips", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(clips) });
-    setClipsSaved(true);
+    try {
+      const res = await fetch("/api/clips", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clips, instrumentalClips }),
+      });
+      if (!res.ok) throw new Error(`Could not save timeline (${res.status}).`);
+      await loadActiveSession();
+      setSessionError("");
+    } catch (error) {
+      setSessionError(error instanceof Error ? error.message : "Could not save timeline.");
+    }
   };
 
   const handleResetClips = async () => {
-    await fetch("/api/clips/reset", { method: "POST" });
-    fetchClips();
+    try {
+      const res = await fetch("/api/clips/reset", { method: "POST" });
+      if (!res.ok) throw new Error(`Could not reset timeline (${res.status}).`);
+      await loadActiveSession();
+      setSessionError("");
+    } catch (error) {
+      setSessionError(error instanceof Error ? error.message : "Could not reset timeline.");
+    }
   };
 
   const deleteImage = async (filename: string) => {
-    await fetch(`/api/image/${encodeURIComponent(filename)}`, { method: "DELETE" });
-    fetchAssets();
+    try {
+      const res = await fetch(`/api/image/${encodeURIComponent(filename)}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(`Could not remove image (${res.status}).`);
+      await loadActiveSession();
+      setSessionError("");
+    } catch (error) {
+      setSessionError(error instanceof Error ? error.message : "Could not remove image.");
+    }
+  };
+
+  const deleteCoverImage = async () => {
+    try {
+      const res = await fetch("/api/cover-image", { method: "DELETE" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.error ?? `Could not remove cover image (${res.status}).`);
+      }
+      await loadActiveSession();
+      setSessionError("");
+    } catch (error) {
+      setSessionError(error instanceof Error ? error.message : "Could not remove cover image.");
+    }
   };
 
   const handleNewSession = async () => {
-    if (!confirm("This will delete all files and reset the session. Continue?")) return;
-    await fetch("/api/cleanup", { method: "POST" });
-    setPipelineStatus("idle");
-    setPipelineLog("");
-    setPipelineStage(null);
-    setSaveStatus("idle");
-    setSaveError("");
-    setLyrics("");
-    setClips([]);
-    setClipsSaved(false);
-    setSelectedSong(null);
-    setSelectedImages([]);
-    if (songRef.current) songRef.current.value = "";
-    if (imagesRef.current) imagesRef.current.value = "";
-    fetchAssets();
+    try {
+      const res = await fetch("/api/sessions", { method: "POST" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.error ?? `Could not create session (${res.status}).`);
+      }
+      setSelectedSong(null);
+      setSelectedImages([]);
+      setSelectedCoverImage(null);
+      setSaveStatus("idle");
+      setSaveError("");
+      if (songRef.current) songRef.current.value = "";
+      if (imagesRef.current) imagesRef.current.value = "";
+      if (coverImageRef.current) coverImageRef.current.value = "";
+      await loadActiveSession();
+    } catch (error) {
+      setSessionError(error instanceof Error ? error.message : "Could not create session.");
+    }
+  };
+
+  const handleActivateSession = async (sessionId: string) => {
+    if (sessionId === activeSessionId || isRunning) return;
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/activate`, { method: "POST" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.error ?? `Could not switch session (${res.status}).`);
+      }
+      setSelectedSong(null);
+      setSelectedImages([]);
+      setSelectedCoverImage(null);
+      setSaveStatus("idle");
+      setSaveError("");
+      if (songRef.current) songRef.current.value = "";
+      if (imagesRef.current) imagesRef.current.value = "";
+      if (coverImageRef.current) coverImageRef.current.value = "";
+      await loadActiveSession();
+    } catch (error) {
+      setSessionError(error instanceof Error ? error.message : "Could not switch session.");
+    }
+  };
+
+  const handleDeleteSession = async (session: SessionSummary) => {
+    if (isRunning || !window.confirm(`Delete "${session.name}" and all of its assets and rendered files? This cannot be undone.`)) {
+      return;
+    }
+
+    setDeletingSessionId(session.id);
+    try {
+      const res = await fetch(`/api/sessions/${session.id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.error ?? `Could not delete session (${res.status}).`);
+      }
+
+      setSelectedSong(null);
+      setSelectedImages([]);
+      setSelectedCoverImage(null);
+      setSaveStatus("idle");
+      setSaveError("");
+      if (songRef.current) songRef.current.value = "";
+      if (imagesRef.current) imagesRef.current.value = "";
+      if (coverImageRef.current) coverImageRef.current.value = "";
+      await loadActiveSession();
+    } catch (error) {
+      setSessionError(error instanceof Error ? error.message : "Could not delete session.");
+    } finally {
+      setDeletingSessionId("");
+    }
   };
 
   const canAlign = assets.hasSong && assets.images.length > 0 && assets.lyrics.trim().length > 0;
@@ -288,11 +461,41 @@ export default function App() {
         </div>
 
         <nav className="sidebar-nav">
-          <div className="nav-item active">Assets</div>
+          <div className="session-list-heading">Sessions</div>
+          <div className="session-list">
+            {sessions.map((session) => (
+              <div
+                key={session.id}
+                className={`session-item ${session.id === activeSessionId ? "active" : ""}`}
+                title={session.name}
+              >
+                <button
+                  type="button"
+                  className="session-select"
+                  disabled={isRunning || Boolean(deletingSessionId)}
+                  onClick={() => handleActivateSession(session.id)}
+                >
+                  <Music2 aria-hidden="true" size={15} />
+                  <span>{session.name}</span>
+                </button>
+                <button
+                  type="button"
+                  className="session-delete"
+                  aria-label={`Delete session ${session.name}`}
+                  title={`Delete ${session.name}`}
+                  disabled={isRunning || Boolean(deletingSessionId)}
+                  onClick={() => handleDeleteSession(session)}
+                >
+                  {deletingSessionId === session.id ? <Spinner /> : <Trash2 aria-hidden="true" size={15} />}
+                </button>
+              </div>
+            ))}
+          </div>
+          {sessionError && <p className="session-error" role="alert">{sessionError}</p>}
         </nav>
 
         <button className="new-session-btn" onClick={handleNewSession}>
-          <RotateCcw aria-hidden="true" size={16} /> New Session
+          <Plus aria-hidden="true" size={16} /> New Session
         </button>
       </aside>
 
@@ -365,6 +568,48 @@ export default function App() {
                 </div>
               </div>
 
+              <div className="field">
+                <label>Optional Instrumental Cover</label>
+                <div className={`upload-box ${selectedCoverImage || assets.coverImage ? "has-file" : ""}`}>
+                  {selectedCoverImage ? (
+                    <span className="file-badge">Selected: {selectedCoverImage.name}</span>
+                  ) : assets.coverImage ? (
+                    <span className="file-badge"><Check aria-hidden="true" size={14} /> Uploaded: {assets.coverImage}</span>
+                  ) : null}
+                  <input
+                    ref={coverImageRef}
+                    type="file"
+                    accept=".png,.jpg,.jpeg,image/png,image/jpeg"
+                    onChange={(e) => setSelectedCoverImage(e.target.files?.[0] ?? null)}
+                  />
+                  <span className="upload-hint">{assets.coverImage ? "Click to replace cover" : "Click to upload (PNG/JPEG)"}</span>
+                </div>
+                <p className="hint">Shown during instrumental sections before, between, and after lyrics.</p>
+                {selectedCoverImage && selectedCoverPreview && (
+                  <div className="cover-preview">
+                    <img src={selectedCoverPreview} alt={`Selected cover: ${selectedCoverImage.name}`} />
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() => {
+                        setSelectedCoverImage(null);
+                        if (coverImageRef.current) coverImageRef.current.value = "";
+                      }}
+                    >
+                      <X aria-hidden="true" size={14} /> Clear selection
+                    </button>
+                  </div>
+                )}
+                {!selectedCoverImage && assets.coverImage && (
+                  <div className="cover-preview">
+                    <img src={`/api/cover-image?v=${encodeURIComponent(assets.coverImage)}`} alt="Uploaded instrumental cover" />
+                    <button type="button" className="btn btn-ghost" onClick={deleteCoverImage}>
+                      <X aria-hidden="true" size={14} /> Remove cover
+                    </button>
+                  </div>
+                )}
+              </div>
+
               {/* Lyrics */}
               <div className="field">
                 <label>Lyrics</label>
@@ -417,13 +662,26 @@ export default function App() {
                 />
                 {openPanel === "timeline" && (
                   <div className="panel-header-actions">
+                    <button className="btn btn-ghost" onClick={handleRealign} disabled={isRunning}>
+                      <RefreshCw aria-hidden="true" size={16} /> Re-align Lyrics
+                    </button>
                     <button className="btn btn-ghost" onClick={handleResetClips}><RotateCcw aria-hidden="true" size={16} /> Reset</button>
                     <button className="btn btn-primary" onClick={handleSaveClips}><Save aria-hidden="true" size={16} /> Save Timeline</button>
                     {clipsSaved && <span className="badge badge-success"><Check aria-hidden="true" size={14} /> Saved</span>}
                   </div>
                 )}
               </div>
-              {openPanel === "timeline" && <Timeline clips={clips} images={assets.images} totalDur={TOTAL_DUR} onChange={(c) => { setClips(c); setClipsSaved(false); }} />}
+              {openPanel === "timeline" && (
+                <Timeline
+                  clips={clips}
+                  instrumentalClips={instrumentalClips}
+                  images={assets.images}
+                  coverImage={assets.coverImage}
+                  totalDur={TOTAL_DUR}
+                  onChange={(nextClips) => { setClips(nextClips); setClipsSaved(false); }}
+                  onInstrumentalChange={(nextClips) => { setInstrumentalClips(nextClips); setClipsSaved(false); }}
+                />
+              )}
             </div>
           )}
 

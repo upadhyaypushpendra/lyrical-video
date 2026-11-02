@@ -31,6 +31,8 @@ interface Timings {
 interface Props {
   timings: Timings;
   bgImages: string[];
+  coverImage?: string | null;
+  instrumentalClips?: { start: number; end: number }[] | null;
 }
 
 // --- Corners only ---
@@ -86,13 +88,40 @@ const getFontSize = (text: string): number => {
 };
 
 const FADE_DURATION = 0.3;
+const MIN_INSTRUMENTAL_DURATION = 2;
 
 const getSegmentEnd = (segment: Segment) => {
   const lastWordEnd = segment.words[segment.words.length - 1]?.end;
   return Number.isFinite(lastWordEnd) ? lastWordEnd : segment.end;
 };
 
-export const LyricalVideo: React.FC<Props> = ({ timings, bgImages }) => {
+const getWordPauseOpacity = (segment: Segment, currentSec: number) => {
+  for (let index = 1; index < segment.words.length; index++) {
+    const pauseStart = segment.words[index - 1].end;
+    const pauseEnd = segment.words[index].start;
+    if (pauseEnd - pauseStart < MIN_INSTRUMENTAL_DURATION) continue;
+    if (currentSec >= pauseStart - FADE_DURATION && currentSec < pauseStart) {
+      return interpolate(
+        currentSec,
+        [pauseStart - FADE_DURATION, pauseStart],
+        [1, 0],
+        { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
+      );
+    }
+    if (currentSec >= pauseStart && currentSec < pauseEnd) return 0;
+    if (currentSec >= pauseEnd && currentSec < pauseEnd + FADE_DURATION) {
+      return interpolate(
+        currentSec,
+        [pauseEnd, pauseEnd + FADE_DURATION],
+        [0, 1],
+        { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
+      );
+    }
+  }
+  return 1;
+};
+
+export const LyricalVideo: React.FC<Props> = ({ timings, bgImages, coverImage = null, instrumentalClips }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
   const currentSec = frame / fps;
@@ -101,7 +130,7 @@ export const LyricalVideo: React.FC<Props> = ({ timings, bgImages }) => {
   const activeSegIndex = (() => {
     for (let i = segments.length - 1; i >= 0; i--) {
       const segment = segments[i];
-      if (currentSec >= segment.start - FADE_DURATION && currentSec <= getSegmentEnd(segment) + FADE_DURATION) return i;
+      if (currentSec >= segment.start - FADE_DURATION && currentSec <= getSegmentEnd(segment)) return i;
     }
     return -1;
   })();
@@ -118,12 +147,20 @@ export const LyricalVideo: React.FC<Props> = ({ timings, bgImages }) => {
   const fontSize  = activeSeg ? getFontSize(activeSeg.text) : 64;
 
   const lineOpacity = activeSeg && activeSegEnd > activeSeg.start
-    ? interpolate(
-        currentSec,
-        [activeSeg.start - FADE_DURATION, activeSeg.start, activeSegEnd, activeSegEnd + FADE_DURATION],
-        [0, 1, 1, 0],
-        { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
-      )
+    ? Math.min(
+        interpolate(
+          currentSec,
+          [activeSeg.start - FADE_DURATION, activeSeg.start],
+          [0, 1],
+          { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
+        ),
+        interpolate(
+          currentSec,
+          [activeSegEnd - FADE_DURATION, activeSegEnd],
+          [1, 0],
+          { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
+        ),
+      ) * getWordPauseOpacity(activeSeg, currentSec)
     : activeSeg ? 1 : 0;
 
   const segStartFrame = activeSeg ? Math.round(activeSeg.start * fps) : 0;
@@ -156,7 +193,7 @@ export const LyricalVideo: React.FC<Props> = ({ timings, bgImages }) => {
 
   return (
     <AbsoluteFill style={{ backgroundColor: "#000" }}>
-      <Background segments={segments} bgImages={bgImages} />
+      <Background segments={segments} bgImages={bgImages} coverImage={coverImage} instrumentalClips={instrumentalClips} />
 
       <AbsoluteFill style={{ background: gradientStyle }} />
 
