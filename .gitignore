@@ -1,0 +1,23 @@
+# Dependencies and build output
+node_modules/
+ui/node_modules/
+ui/dist/
+out/
+
+# Python environment and cache
+python/.venv/
+__pycache__/
+*.py[cod]
+
+# Uploaded and generated media/assets
+public/bg/
+python/bg/
+public/song.mp3
+public/song.ass
+public/timings.json
+public/clips.json
+python/song.mp3
+python/lyrics.txt
+python/song.ass
+python/timings.json
+python/out*.mp4
